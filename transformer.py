@@ -1,7 +1,7 @@
 from typing import Optional, List
 from collections import namedtuple
 
-import torch as th
+import torch
 from torch import nn
 from torch.nn import functional as F
 
@@ -19,7 +19,7 @@ class PositionEmbedding(nn.Module):
         super(PositionEmbedding, self).__init__()
 
         assert hidden_size % 2 == 0 and 'Model vector size must be even for sinusoidal encoding'
-        power = th.arange(0, hidden_size, step=2, dtype=th.float32)[:] / hidden_size
+        power = torch.arange(0, hidden_size, step=2, dtype=torch.float32)[:] / hidden_size
         divisor = 10000 ** power
         self.divisor = divisor
         self.hidden_size = hidden_size
@@ -40,27 +40,25 @@ class PositionEmbedding(nn.Module):
 
         assert inputs.shape[-1] == self.hidden_size and 'Input final dim must match model hidden size'
 
-        batch_size = inputs.shape[0]
-        sequence_length = inputs.shape[1]
+        n, l, d = inputs.size()
 
         # obtain a sequence that starts at `start` and increments for `sequence_length `
-        seq_pos = th.arange(start, sequence_length + start, dtype=th.float32)
+        seq_pos = torch.arange(start, l + start, dtype=torch.float32)
         seq_pos_expanded = seq_pos[None,:,None]
         index = seq_pos_expanded.repeat(*[1,1,self.hidden_size//2])
 
         # create the position embedding as described in the paper
         # use the `divisor` attribute instantiated in __init__
-        sin_embedding =
-        cos_embedding =
+        sin_embedding = torch.sin(index / self.divisor)
+        cos_embedding = torch.cos(index / self.divisor)
 
         # interleave the sin and cos. For more info see:
         # https://discuss.pytorch.org/t/how-to-interleave-two-tensors-along-certain-dimension/11332/3
-        position_shape = (1, , ) # fill in the other two dimensions
-        position_embedding = th.stack((sin_embedding,cos_embedding), dim=3).view(position_shape)
+        position_shape = (1, l, d) # fill in the other two dimensions
+        position_embedding = torch.stack((sin_embedding,cos_embedding), dim=3).view(position_shape)
 
         pos_embed_deviced = position_embedding.to(get_device())
-        return  # add the embedding to the input
-        ####################################  END OF YOUR CODE  ##################################
+        return inputs + pos_embed_deviced
 
 class TransformerFeedForward(nn.Module):
     def __init__(self, input_size,
@@ -81,15 +79,10 @@ class TransformerFeedForward(nn.Module):
         self.dropout = nn.Dropout(0 if dropout is None else dropout)
 
     def forward(self, inputs):
-        ####################################  YOUR CODE HERE  ####################################
-        # PART 4.1: Implement the FeedForward Layer.
-        # As seen in fig1, the feedforward layer includes a normalization and residual
-        norm_input =
-        dense_out =
-        dense_drop =  # Add the dropout here
-        return  # Add the residual here
-        ####################################  END OF YOUR CODE  ##################################
-
+        norm_input = self.norm(inputs)
+        dense_out = self.feed_forward(norm_input)
+        dense_drop =  self.dropout(dense_out)
+        return dense_drop + inputs
 
 class TransformerEncoderBlock(nn.Module):
     """An encoding block from the paper Attention Is All You Need (https://arxiv.org/pdf/1706.03762.pdf).
@@ -111,24 +104,11 @@ class TransformerEncoderBlock(nn.Module):
         self.feed_forward = TransformerFeedForward(input_size, filter_size, hidden_size, dropout)
 
     def forward(self, inputs, self_attention_mask=None):
-
-        ####################################  YOUR CODE HERE  ####################################
-        # PART 4.2: Implement the Transformer Encoder according to section 3.1 of the paper.
-        # Perform a multi-headed self-attention across the inputs.
-
-        # First normalize the input with the LayerNorm initialized in the __init__ function (self.norm)
-        norm_inputs =
-
-        # Apply the self-attention with the normalized input, use the self_attention mask as the optional mask parameter.
-        attn =
-
-        # Apply the residual connection. res_attn should sum the attention output and the original, non-normalized inputs
-        res_attn =  # Residual connection of the attention block
-
-        # output passes through a feed_forward network
-        output =
+        norm_inputs = self.norm(inputs)
+        attn = self.self_attention((norm_inputs, norm_inputs), mask=self_attention_mask)
+        res_attn = attn + inputs
+        output = self.feed_forward(res_attn)
         return output
-
 
 class TransformerDecoderBlock(nn.Module):
     """A decoding block from the paper Attention Is All You Need (https://arxiv.org/pdf/1706.03762.pdf).
@@ -166,10 +146,13 @@ class TransformerDecoderBlock(nn.Module):
         # mask to control for the future outputs.
         # This generates a tensor of size [batch_size x target_len x d_model]
 
-        norm_decoder_inputs =
+        norm_decoder_inputs = self.self_norm(decoder_inputs)
 
-        target_selfattn =
-        res_target_self_attn =
+        target_selfattn = self.self_attention(
+            (norm_decoder_inputs, norm_decoder_inputs), 
+            mask=self_attention_mask
+        )
+        res_target_self_attn = target_selfattn + decoder_inputs
 
         # Compute the attention using the keys/values from the encoder, and the query from the
         # decoder. This takes the encoder output of size [batch_size x source_len x d_model] and the
@@ -177,13 +160,16 @@ class TransformerDecoderBlock(nn.Module):
         # a multi-headed attention across them, giving an output of [batch_size x target_len x d_model]
         # using the encoder as the keys and values and the target as the queries
 
-        norm_target_selfattn =
-        norm_encoder_outputs =
-        encdec_attention =
+        norm_target_selfattn = self.cross_norm_target(res_target_self_attn)
+        norm_encoder_outputs = self.cross_norm_source(encoder_outputs)
+        encdec_attention = self.cross_attention(
+            (norm_target_selfattn, norm_encoder_outputs), 
+            mask=cross_attention_mask
+        )
         # Take the residual between the output and the unnormalized target input of the cross-attention
-        res_encdec_attention =
+        res_encdec_attention = encdec_attention + res_target_self_attn
 
-        output =
+        output = self.feed_forward(res_encdec_attention)
 
         return output
 
@@ -220,7 +206,6 @@ class TransformerEncoder(nn.Module):
             output = encoder(output, self_attention_mask=encoder_mask)
 
         return output
-
 
 class TransformerDecoder(nn.Module):
     """
@@ -288,7 +273,7 @@ class TransformerDecoder(nn.Module):
         return output
 
     def shift_target_sequence_right(self, target_sequence):
-        constant_values = 0 if target_sequence.dtype in [th.int32, th.int64] else 1e-10
+        constant_values = 0 if target_sequence.dtype in [torch.int32, torch.int64] else 1e-10
         pad_array = [1,0,0,0]
         target_sequence = F.pad(target_sequence, pad_array, value=constant_values)[:, :-1]
         return target_sequence
@@ -303,8 +288,8 @@ class TransformerDecoder(nn.Module):
             :return mask Tensor with shape [batch_size, sequence_length, sequence_length]
         """
 
-        xind = th.arange(sequence_length)[None,:].repeat(*(sequence_length, 1))
-        yind = th.arange(sequence_length)[:,None].repeat(*(1, sequence_length))
+        xind = torch.arange(sequence_length)[None,:].repeat(*(sequence_length, 1))
+        yind = torch.arange(sequence_length)[:,None].repeat(*(1, sequence_length))
         mask = yind >= xind
         mask = mask[None,...].repeat(*(batch_size, 1, 1))
 
@@ -337,7 +322,7 @@ class TransformerDecoder(nn.Module):
                                     *(1, encoder_output.shape[1], 1)).permute((0, 2, 1))
             enc_attention_mask = encoder_mask[:, 1, :][:, :, None].repeat(
                                     *(1, 1, decoder_input.shape[1])).permute((0, 2, 1))
-            cross_attention_mask = th.logical_and(enc_attention_mask, dec_attention_mask)
+            cross_attention_mask = torch.logical_and(enc_attention_mask, dec_attention_mask)
 
         return cross_attention_mask
 
@@ -424,7 +409,7 @@ class Transformer(nn.Module):
         # PART 5: Implement the full Transformer block
 
         # Using the self.encoder, encode the source_sequence, and provide the encoder_mask variable as the optional mask.
-        encoder_output =
+        encoder_output = self.encoder(source_sequence, encoder_mask=encoder_mask)
 
         # Finally, we need to do a decoding this should generate a
         # tensor of shape [batch_size x target_length x d_model]
@@ -433,6 +418,13 @@ class Transformer(nn.Module):
         # As usual, provide it with the encoder and decoder_masks
         # Finally, You should also pass it these two optional arguments:
         # shift_target_sequence_right=shift_target_sequence_right, mask_future=mask_future
-        decoder_output =
+        decoder_output = self.decoder(
+            target_sequence,
+            encoder_output,
+            encoder_mask=encoder_mask,
+            decoder_mask=decoder_mask,
+            mask_future=mask_future,
+            shift_target_sequence_right=shift_target_sequence_right
+        )
 
         return decoder_output # We return the decoder's output

@@ -1,10 +1,10 @@
 from typing import Optional, Callable, Tuple
 
-import torch as th
+import math
+import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import weight_norm
-# from tensorflow.keras.layers import Layer
 
 from transformer_utils import ApplyAttentionMask
 
@@ -27,25 +27,29 @@ class AttentionQKV(nn.Module):
 
             :return: output: Tensor with shape [batch_size, heads (optional), n_queries, depth_v]
         """
-        ####################################  YOUR CODE HERE  ####################################
-        # n_queries corresponds to the sequence length on the query side
-        # n_keyval corresponds to the sequence length on the key side (and value, as they are one and the same)
-        # depth_k is the size of the projection that the key / query comparison is performed on.
-        # depth_v is the size of the projection of the value projection. In a setting with one head, it is usually the dimension (dim) of the Transformer.
-        # heads corresponds to the number of heads the attention is performed on.
-        # If you are unfamiliar with attention heads, read section 3.2.2 of the Attention is all you need paper
+        # weights
+        if len(queries.size()) > 3:
+            # (N, h, q, d) (N, h, d, k) -> (N, h, q, k)
+            sum_exp = "nhqd,nhdk->nhqk"
+            keys_ = keys.permute(0, 1, 3, 2)
+        else:
+            # (N, q, d) (N, d, k) -> (N, q, k)
+            sum_exp = "nqd,ndk->nqk"
+            keys_ = keys.permute(0, 2, 1)
+        sim = torch.einsum(sum_exp, queries, keys_)
+        
+        # mask and normalize
+        masked_sim = self.apply_mask(sim, mask=mask)
+        weights = F.softmax(masked_sim / math.sqrt(keys.shape[-1]), dim=-1)
 
-        # PART 1: Implement Attention QKV
-        # Use queries, keys and values to compute the output of the QKV attention
-
-        # As defined is the Attention is all you need paper: https://arxiv.org/pdf/1706.03762.pdf
-        key_dim = th.tensor(keys.shape[-1],dtype=th.float32)
-        similarity =  # Compute the similarity according to the QKV formula
-
-        masked_similarity = self.apply_mask(similarity, mask=mask) # We give you the mask to apply so that it is correct, you do not need to modify this.
-        weights =  # Turn the similarity into a normalized output. Remember that the last dim contains the features
-        output =  # Obtain the output
-        ####################################  END OF YOUR CODE  ##################################
+        # attention output
+        if len(masked_sim.size()) > 3:
+            # (N, h, q, k) (N, h, k, v) -> (N, h, q, v)
+            sum_exp = "nhqk,nhkv->nhqv"
+        else:
+            # (N, q, k) (N, k, v) -> (N, q, v)
+            sum_exp = "nqk,nkv->nqv"
+        output = torch.einsum(sum_exp, weights, values)
 
         return output, weights
 
@@ -94,36 +98,23 @@ class MultiHeadProjection(nn.Module):
 
     def _split_heads(self, tensor):
         assert len(tensor.shape) == 3
-        ####################################  YOUR CODE HERE  ####################################
-        # PART 2: Implement the Multi-head attention.
-        # You are given a Tensor which is one of the projections (K, Q or V)
-        # and you must "split it" in self.n_heads. This splitting should add a dimension to the tensor,
-        # so that each head acts independently
 
-        batch_size, tensorlen = tensor.shape[0], tensor.shape[1]
-        feature_size = tensor.shape[2]
-
-        new_feature_size =  # Compute what the feature size per head is.
-        # Reshape this projection tensor so that it has n_heads, each of new_feature_size
-        tensor =
-        # Transpose the matrix so the outer-dimensions are the batch-size and the number of heads
-        tensor =
+        n, l, d = tensor.size()
+        # (N, l, d) -> (N, l, h, d/h)
+        tensor = torch.reshape(tensor, (n, l, self.n_heads, int(d/self.n_heads)))
+        # (N, l, h, d/h) -> (N, h, l, d/h)
+        tensor = tensor.permute(0, 2, 1, 3)
         return tensor
         ##########################################################################################
 
     def _combine_heads(self, tensor):
         assert len(tensor.shape) == 4
-        ####################################  YOUR CODE HERE  ####################################
-        # PART 2: Implement the Multi-head attention.
-        # You are given the output from all the heads, and you must combine them back into 1 rank-3 matrix
 
-        # Transpose back compared to the split, so that the outer dimensions are batch_size and sequence_length again
-        tensor =
-        batch_size, tensorlen = tensor.shape[0], tensor.shape[1]
-        feature_size = tensor.shape[-1]
-
-        new_feature_size =  # What is the new feature size, if we combine all the heads
-        tensor =  # Reshape the Tensor to remove the heads dimension and come back to a Rank-3 tensor
+        n, h, l, d = tensor.size()
+        # (N, h, l, d) -> (N, l, h, d)
+        tensor = tensor.permute(0, 2, 1, 3)
+        # (N, l, h, d) -> (N, l, d*h)
+        tensor = torch.reshape(tensor, (n, l, d*h))
         return tensor
         ##########################################################################################
 
